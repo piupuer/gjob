@@ -1,4 +1,4 @@
-module gjob
+module github.com/piupuer/gjob
 
 go 1.16
 
