@@ -14,19 +14,28 @@ func TestNew(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	job.AddJob("work", "@every 10s", "{}")
-	job.RegisterHandleFunc("work", func(ctx context.Context, task GoodTask) error {
+	err = job.AddJob("work", "@every 10s", "{}", func(ctx context.Context, task GoodTask) error {
 		fmt.Println(time.Now(), task.Name, task.Expr, "executing")
-		time.Sleep(5 * time.Minute)
+		time.Sleep(30 * time.Second)
 		return nil
-	})
-	job.AddJob("work2", "@every 20s", "{}")
-	job.RegisterHandleFunc("work2", func(ctx context.Context, task GoodTask) error {
+	}).Start()
+	if err != nil {
+		panic(err)
+	}
+
+	err = job.AddJob("work2", "@every 20s", "{}", func(ctx context.Context, task GoodTask) error {
 		fmt.Println(time.Now(), task.Name, task.Expr, "executing")
-		time.Sleep(60 * time.Second)
+		time.Sleep(15 * time.Second)
 		return nil
-	})
-	job.Start()
+	}).Start()
+	if err != nil {
+		panic(err)
+	}
+	time.Sleep(50 * time.Second)
+	err = job.Stop("work2")
+	if err != nil {
+		panic(err)
+	}
 
 	ch := make(chan int, 0)
 	<-ch
