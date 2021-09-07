@@ -15,6 +15,7 @@ type GoodJob struct {
 	lock      sync.Mutex
 	server    *asynq.Server
 	scheduler *asynq.Scheduler
+	inspector *asynq.Inspector
 	redis     asynq.RedisConnOpt
 	tasks     map[string]GoodTask
 	handles   map[string]func(context.Context, GoodTask) error
@@ -23,6 +24,7 @@ type GoodJob struct {
 
 type GoodTask struct {
 	Name string
+	Expr string
 	Json string
 	t    *asynq.Task
 }
@@ -49,8 +51,9 @@ func (g GoodJob) AddJob(taskName, expr, taskJson string) GoodJob {
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	task := asynq.NewTask(taskName, []byte(taskJson))
-	g.tasks[expr] = GoodTask{
+	g.tasks[taskName] = GoodTask{
 		Name: task.Type(),
+		Expr: expr,
 		Json: string(task.Payload()),
 		t:    task,
 	}
@@ -85,10 +88,14 @@ func (g GoodJob) Start() error {
 	server := asynq.NewServer(
 		g.redis,
 		asynq.Config{
-			Concurrency:         10,
-			RetryDelayFunc:      nil,
-			IsFailure:           nil,
-			Queues:              nil,
+			Concurrency:    10,
+			RetryDelayFunc: nil,
+			IsFailure:      nil,
+			Queues: map[string]int{
+				"critical": 6,
+				"default":  3,
+				"low":      1,
+			},
 			StrictPriority:      false,
 			ErrorHandler:        nil,
 			Logger:              nil,
@@ -100,14 +107,23 @@ func (g GoodJob) Start() error {
 	)
 	h := asynq.NewServeMux()
 	for name, handle := range g.handles {
-		for expr, task := range g.tasks {
-			if task.Name == name {
-				entryId, err := scheduler.Register(expr, task.t)
+		for taskName, task := range g.tasks {
+			if taskName == name {
+				entryId, err := scheduler.Register(
+					task.Expr,
+					task.t,
+					asynq.MaxRetry(0),
+					asynq.Timeout(24*time.Hour),
+				)
 				if err != nil {
 					return err
 				}
 				g.entries[name] = entryId
 				h.HandleFunc(name, func(ctx context.Context, t *asynq.Task) error {
+					active := g.isActive(t.Type())
+					if active {
+						return nil
+					}
 					task := GoodTask{
 						Name: t.Type(),
 						Json: string(t.Payload()),
@@ -122,5 +138,33 @@ func (g GoodJob) Start() error {
 	go scheduler.Run()
 	g.server = server
 	g.scheduler = scheduler
+	g.inspector = asynq.NewInspector(g.redis)
 	return nil
+}
+
+func (g GoodJob) isActive(name string) bool {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	queues, err := g.inspector.Queues()
+	if err != nil {
+		return false
+	}
+	currentTasks := make([]*asynq.TaskInfo, 0)
+	for _, queue := range queues {
+		tasks, err := g.inspector.ListActiveTasks(queue)
+		if err != nil {
+			return false
+		}
+		l := len(tasks)
+		for i := 0; i < l; i++ {
+			if tasks[i].Type == name {
+				currentTasks = append(currentTasks, tasks[i])
+			}
+		}
+	}
+	m := len(currentTasks)
+	if m > 1 {
+		return true
+	}
+	return false
 }

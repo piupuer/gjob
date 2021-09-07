@@ -16,9 +16,14 @@ func TestNew(t *testing.T) {
 	}
 	job.AddJob("work", "@every 10s", "{}")
 	job.RegisterHandleFunc("work", func(ctx context.Context, task GoodTask) error {
-		fmt.Println("ctx", ctx)
-		fmt.Println("task", task)
-		time.Sleep(10 * time.Second)
+		fmt.Println(time.Now(), task.Name, task.Expr, "executing")
+		time.Sleep(5 * time.Minute)
+		return nil
+	})
+	job.AddJob("work2", "@every 20s", "{}")
+	job.RegisterHandleFunc("work2", func(ctx context.Context, task GoodTask) error {
+		fmt.Println(time.Now(), task.Name, task.Expr, "executing")
+		time.Sleep(60 * time.Second)
 		return nil
 	})
 	job.Start()
