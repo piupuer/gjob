@@ -51,7 +51,7 @@ func (rd *RedisClientDriver) heartBeat(nodeID string) {
 			log.Printf("redis expire error %+v", err)
 			continue
 		}
-		if keyExist == 0 {
+		if keyExist == int64(0) {
 			if err := rd.registerServiceNode(nodeID); err != nil {
 				log.Printf("register service node error %+v", err)
 			}

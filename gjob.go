@@ -108,6 +108,7 @@ func (g *GoodJob) Stop(taskName string) {
 			task.cron.Stop()
 			task.running = false
 			g.tasks[task.Name] = task
+			delete(g.tasks, taskName)
 			break
 		} else {
 			fmt.Printf("task %s is not running, skip\n", task.Name)
