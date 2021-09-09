@@ -3,224 +3,129 @@ package gjob
 import (
 	"context"
 	"fmt"
+	"github.com/go-redis/redis/v7"
 	"github.com/hibiken/asynq"
+	"github.com/libi/dcron"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
 type Config struct {
-	RedisUri string
+	RedisUri    string
+	RedisClient redis.UniversalClient
 }
 
 type GoodJob struct {
-	lock         sync.Mutex
-	started      bool
-	server       *asynq.Server
-	scheduler    *asynq.Scheduler
-	mux          *asynq.ServeMux
-	inspector    *asynq.Inspector
-	redis        asynq.RedisConnOpt
-	active       map[string]*int32
-	tasks        map[string]GoodTask
-	queueTasks   map[string]GoodTask
-	handles      map[string]func(context.Context, GoodTask) error
-	queueHandles map[string]func(context.Context, GoodTask) error
-	entries      map[string]string
+	lock   sync.Mutex
+	redis  redis.UniversalClient
+	driver *RedisClientDriver
+	tasks  map[string]GoodTask
+	Error  error
 }
 
 type GoodTask struct {
-	Id   string
-	Name string
-	Expr string
-	Json string
-	t    *asynq.Task
+	cron       *dcron.Dcron
+	running    bool
+	Name       string
+	Expr       string
+	Payload    string
+	Func       func(ctx context.Context) error
+	ErrHandler func(err error)
 }
 
 func New(cfg Config) (*GoodJob, error) {
 	if cfg.RedisUri == "" {
 		cfg.RedisUri = "redis://127.0.0.1:6379/0"
 	}
-	opt, err := asynq.ParseRedisURI(cfg.RedisUri)
+	r, err := getRedisClientFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	// init fields
 	job := GoodJob{
-		redis: opt,
+		redis: r,
 	}
-	job.active = make(map[string]*int32)
-	job.tasks = make(map[string]GoodTask)
-	job.queueTasks = make(map[string]GoodTask)
-	job.handles = make(map[string]func(context.Context, GoodTask) error)
-	job.queueHandles = make(map[string]func(context.Context, GoodTask) error)
-	job.entries = make(map[string]string)
-	job.inspector = asynq.NewInspector(job.redis)
-	job.server = asynq.NewServer(
-		job.redis,
-		asynq.Config{
-			Concurrency:    10,
-			RetryDelayFunc: nil,
-			IsFailure:      nil,
-			Queues: map[string]int{
-				"critical": 6,
-				"default":  3,
-				"low":      1,
-			},
-			StrictPriority:      false,
-			ErrorHandler:        nil,
-			Logger:              nil,
-			LogLevel:            0,
-			ShutdownTimeout:     0,
-			HealthCheckFunc:     nil,
-			HealthCheckInterval: 0,
-		},
-	)
-	job.mux = asynq.NewServeMux()
-	job.scheduler = asynq.NewScheduler(
-		job.redis,
-		&asynq.SchedulerOpts{
-			Logger:              nil,
-			LogLevel:            asynq.DebugLevel,
-			Location:            time.Local,
-			EnqueueErrorHandler: nil,
-		},
-	)
+	drv, err := NewDriver(job.redis)
+	if err != nil {
+		return nil, err
+	}
+	job.driver = drv
+	job.tasks = make(map[string]GoodTask, 0)
 	return &job, nil
 }
 
-func (g *GoodJob) AddJob(taskName, expr, taskJson string, handler func(context.Context, GoodTask) error) *GoodJob {
+func (g *GoodJob) AddTask(task GoodTask) *GoodJob {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	task := asynq.NewTask(taskName, []byte(taskJson))
-	g.tasks[taskName] = GoodTask{
-		Name: task.Type(),
-		Expr: expr,
-		Json: string(task.Payload()),
-		t:    task,
+	if _, ok := g.tasks[task.Name]; ok {
+		fmt.Printf("task %s already exists, skip\n", task.Name)
+		return g
 	}
-	g.handles[taskName] = handler
+	task.cron = dcron.NewDcron(task.Name, g.driver)
+	g.tasks[task.Name] = task
+	fun := (func(task GoodTask) func() {
+		return func() {
+			ctx := context.Background()
+			err := task.Func(ctx)
+			if err != nil {
+				task.ErrHandler(err)
+			}
+		}
+	})(task)
+	task.cron.AddFunc(task.Name, task.Expr, fun)
 	return g
 }
 
-func (g *GoodJob) Start() error {
+func (g *GoodJob) Start() {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	if len(g.tasks) == 0 {
-		return fmt.Errorf("please add job before start")
-	}
-	if len(g.handles) == 0 {
-		return fmt.Errorf("please add job before start")
-	}
-	if !g.started {
-		// the server only needs to be started once
-		g.mux = asynq.NewServeMux()
-		go g.scheduler.Run()
-		go g.server.Run(g.mux)
-		g.started = true
-	}
-
-	for name, handle := range g.handles {
-		for taskName, task := range g.tasks {
-			if taskName == name {
-				// register task
-				entryId, err := g.scheduler.Register(
-					task.Expr,
-					task.t,
-					asynq.MaxRetry(0),
-					asynq.Timeout(24*time.Hour),
-				)
-				if err != nil {
-					return err
-				}
-				g.entries[name] = entryId
-				// register task callback function
-				fun := (func(job *GoodJob, id, expr string, f func(ctx context.Context, t GoodTask) error) func(ctx context.Context, t *asynq.Task) error {
-					return func(ctx context.Context, t *asynq.Task) error {
-						active := job.jobIsActive(t.Type())
-						if active {
-							return nil
-						}
-						task := GoodTask{
-							Id:   entryId,
-							Expr: expr,
-							Name: t.Type(),
-							Json: string(t.Payload()),
-							t:    t,
-						}
-						return f(ctx, task)
-					}
-				})(g, entryId, task.Expr, handle)
-				g.mux.HandleFunc(name, fun)
-			}
+	for _, task := range g.tasks {
+		if !task.running {
+			task.cron.Start()
+			task.running = true
+			g.tasks[task.Name] = task
 		}
 	}
-
-	for name := range g.tasks {
-		g.queueTasks[name] = g.tasks[name]
-		i := int32(0)
-		g.active[name] = &i
-	}
-	for name := range g.handles {
-		g.queueHandles[name] = g.handles[name]
-	}
-	g.tasks = make(map[string]GoodTask)
-	g.handles = make(map[string]func(context.Context, GoodTask) error)
-	return nil
 }
 
-func (g *GoodJob) Stop(taskName string) error {
+func (g *GoodJob) StopAll() {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	entry, ok := g.entries[taskName]
-	if !ok {
-		return fmt.Errorf("job %s not register", taskName)
+	for _, task := range g.tasks {
+		if task.running {
+			task.cron.Stop()
+			task.running = false
+			g.tasks[task.Name] = task
+		}
 	}
-	err := g.scheduler.Unregister(entry)
-	if err != nil {
-		return err
-	}
-	delete(g.active, taskName)
-	delete(g.queueTasks, taskName)
-	delete(g.queueHandles, taskName)
-	return nil
 }
 
-// check job status is active(the same task name)
-func (g *GoodJob) jobIsActive(name string) bool {
+func (g *GoodJob) Stop(taskName string) {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	active, ok := g.active[name]
-	if !ok {
-		return true
+	for _, task := range g.tasks {
+		if task.running && task.Name == taskName {
+			task.cron.Stop()
+			task.running = false
+			g.tasks[task.Name] = task
+			break
+		} else {
+			fmt.Printf("task %s is not running, skip\n", task.Name)
+		}
 	}
-	v := atomic.LoadInt32(active)
-	if v == 1 {
-		return true
-	}
-	atomic.AddInt32(active, 1)
-	defer atomic.AddInt32(active, -1)
-	queues, err := g.inspector.Queues()
-	if err != nil {
-		return false
-	}
-	currentTasks := make([]*asynq.TaskInfo, 0)
-	for _, queue := range queues {
-		tasks, err := g.inspector.ListActiveTasks(queue)
+}
+
+func getRedisClientFromConfig(cfg Config) (redis.UniversalClient, error) {
+	var opt asynq.RedisConnOpt
+	var err error
+	if cfg.RedisUri != "" {
+		opt, err = asynq.ParseRedisURI(cfg.RedisUri)
 		if err != nil {
-			return false
+			return nil, err
 		}
-		l := len(tasks)
-		for i := 0; i < l; i++ {
-			if tasks[i].Type == name {
-				currentTasks = append(currentTasks, tasks[i])
-			}
-		}
+		return opt.MakeRedisClient().(redis.UniversalClient), nil
+	} else if cfg.RedisClient != nil {
+		return cfg.RedisClient, nil
 	}
-	m := len(currentTasks)
-	if m > 1 {
-		return true
-	}
-	return false
+	return nil, fmt.Errorf("invalid redis config")
 }

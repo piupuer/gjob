@@ -3,9 +3,16 @@ package gjob
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
 	"testing"
 	"time"
 )
+
+func Run(ctx context.Context) error {
+	http.Get(fmt.Sprintf("http://106.75.132.201/api/ping?key=%d&pid=%d", time.Now().Unix(), os.Getpid()))
+	return nil
+}
 
 func TestNew(t *testing.T) {
 	job, err := New(Config{
@@ -14,28 +21,27 @@ func TestNew(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	err = job.AddJob("work", "@every 10s", "{}", func(ctx context.Context, task GoodTask) error {
-		fmt.Println(time.Now(), task.Name, task.Expr, "executing")
-		time.Sleep(30 * time.Second)
-		return nil
+	job.AddTask(GoodTask{
+		Name:    "work",
+		Expr:    "@every 10s",
+		Payload: "{}",
+		Func: func(ctx context.Context) error {
+			return Run(ctx)
+		},
 	}).Start()
-	if err != nil {
-		panic(err)
-	}
 
-	err = job.AddJob("work2", "@every 20s", "{}", func(ctx context.Context, task GoodTask) error {
-		fmt.Println(time.Now(), task.Name, task.Expr, "executing")
-		time.Sleep(15 * time.Second)
-		return nil
+	time.Sleep(30 * time.Second)
+	job.AddTask(GoodTask{
+		Name:    "work2",
+		Expr:    "@every 5s",
+		Payload: "{}",
+		Func: func(ctx context.Context) error {
+			return Run(ctx)
+		},
 	}).Start()
-	if err != nil {
-		panic(err)
-	}
-	time.Sleep(50 * time.Second)
-	err = job.Stop("work2")
-	if err != nil {
-		panic(err)
-	}
+	
+	time.Sleep(15 * time.Second)
+	job.Stop("work")
 
 	ch := make(chan int, 0)
 	<-ch
