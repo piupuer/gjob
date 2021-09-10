@@ -88,6 +88,7 @@ func (g *GoodJob) Start() {
 	}
 }
 
+// stop all task in current node(task still running in other node)
 func (g *GoodJob) StopAll() {
 	g.lock.Lock()
 	defer g.lock.Unlock()
@@ -100,6 +101,7 @@ func (g *GoodJob) StopAll() {
 	}
 }
 
+// stop task in current node(task still running in other node)
 func (g *GoodJob) Stop(taskName string) {
 	g.lock.Lock()
 	defer g.lock.Unlock()
