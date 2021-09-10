@@ -33,18 +33,21 @@ type GoodTask struct {
 }
 
 func New(cfg Config) (*GoodJob, error) {
-	if cfg.RedisUri == "" {
-		cfg.RedisUri = "redis://127.0.0.1:6379/0"
-	}
-	r, err := getRedisClientFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
 	// init fields
-	job := GoodJob{
-		redis: r,
+	job := GoodJob{}
+	if cfg.RedisClient != nil {
+		job.redis = cfg.RedisClient
+	} else {
+		if cfg.RedisUri == "" {
+			cfg.RedisUri = "redis://127.0.0.1:6379/0"
+		}
+		r, err := ParseRedisURI(cfg.RedisUri)
+		if err != nil {
+			return nil, err
+		}
+		job.redis = r
 	}
+	
 	drv, err := NewDriver(job.redis)
 	if err != nil {
 		return nil, err
@@ -52,6 +55,19 @@ func New(cfg Config) (*GoodJob, error) {
 	job.driver = drv
 	job.tasks = make(map[string]GoodTask, 0)
 	return &job, nil
+}
+
+func ParseRedisURI(uri string) (redis.UniversalClient, error) {
+	var opt asynq.RedisConnOpt
+	var err error
+	if uri != "" {
+		opt, err = asynq.ParseRedisURI(uri)
+		if err != nil {
+			return nil, err
+		}
+		return opt.MakeRedisClient().(redis.UniversalClient), nil
+	}
+	return nil, fmt.Errorf("invalid redis config")
 }
 
 func (g *GoodJob) AddTask(task GoodTask) *GoodJob {
@@ -116,19 +132,4 @@ func (g *GoodJob) Stop(taskName string) {
 			fmt.Printf("task %s is not running, skip\n", task.Name)
 		}
 	}
-}
-
-func getRedisClientFromConfig(cfg Config) (redis.UniversalClient, error) {
-	var opt asynq.RedisConnOpt
-	var err error
-	if cfg.RedisUri != "" {
-		opt, err = asynq.ParseRedisURI(cfg.RedisUri)
-		if err != nil {
-			return nil, err
-		}
-		return opt.MakeRedisClient().(redis.UniversalClient), nil
-	} else if cfg.RedisClient != nil {
-		return cfg.RedisClient, nil
-	}
-	return nil, fmt.Errorf("invalid redis config")
 }
