@@ -47,7 +47,7 @@ func New(cfg Config) (*GoodJob, error) {
 		}
 		job.redis = r
 	}
-	
+
 	drv, err := NewDriver(job.redis)
 	if err != nil {
 		return nil, err
@@ -84,7 +84,9 @@ func (g *GoodJob) AddTask(task GoodTask) *GoodJob {
 			ctx := context.Background()
 			err := task.Func(ctx)
 			if err != nil {
-				task.ErrHandler(err)
+				if task.ErrHandler != nil {
+					task.ErrHandler(err)
+				}
 			}
 		}
 	})(task)
